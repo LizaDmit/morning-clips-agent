@@ -1,50 +1,54 @@
 Attribute VB_Name = "Formatting"
 Option Explicit
 
-' ================= FormatMorningClips (v11 - Summary + FULL ARTICLES) =================
+' ================= FormatMorningClips (v12 - Summary + FULL ARTICLES) =================
 ' Input: raw Reporter+FullArticles .docx. Output: gold visual format.
 ' One-shot on a FRESH file; not idempotent.
 ' SINGLE MODULE - all procedures below. Delete any other module holding an older copy.
 '
-' v11: Full Articles headlines are NUMBERED (1. 2. 3., per-section, resetting after
-' FULL ARTICLES), not dash-bulleted. Any leading "- " the prompt emits is stripped
-' before numbering. Byline gets a gap ABOVE it; date sits tight below the byline,
-' with the normal body gap below the date. Roster pruning and long-paragraph
-' repair remain Summary-only; Full Articles stays fully verbatim. Divider is
-' inserted before FULL ARTICLES, not at document end, when that section exists.
+' v12 changes from v11:
+'  - SplitSocials no longer splits a summary HEADLINE that begins with a social
+'    label ("Facebook parent Meta ... | SCMP"). That split was creating a stray
+'    "* Facebook" line and leaving the headline as "parent Meta ...", which
+'    NumberHeadlines then renumbered. Guard is "Not IsHeadline(s)".
+'  - CheckCat2Highlighting: additive audit run after HighlightAll. Cross-checks
+'    the Reporter's section placement against the macro's independent keyword
+'    highlighting. Reports, changes nothing.
 
 ' ---- Indent constants (CENTIMETERS) ----
 Private Const IND_TRAD    As Single = 0.04
 Private Const IND_SEC_NUM As Single = 0.44  ' i. ii. iii. numeral
-Private Const IND_SEC_TXT As Single = 1.31   ' section text, No relevant news
-Private Const IND_ART_NUM As Single = 1.31   ' 1. 2. 3. numeral
-Private Const IND_ART_TXT As Single = 1.94   ' headline text, body, URLs, rosters
-Private Const IND_SOC_NUM As Single = 0.64   ' bullet
-Private Const IND_SOC_TXT As Single = 1.27   ' social label
+Private Const IND_SEC_TXT As Single = 1.31  ' section text, No relevant news
+Private Const IND_ART_NUM As Single = 1.31  ' 1. 2. 3. numeral
+Private Const IND_ART_TXT As Single = 1.94  ' headline text, body, URLs, rosters
+Private Const IND_SOC_NUM As Single = 0.64  ' bullet
+Private Const IND_SOC_TXT As Single = 1.27  ' social label
+
 ' ---- Margins (CENTIMETERS) ----
 Private Const MARGIN_TOP    As Single = 2.49
 Private Const MARGIN_BOTTOM As Single = 2.54
 Private Const MARGIN_LEFT   As Single = 3.17
 Private Const MARGIN_RIGHT  As Single = 3.17
+
 ' ---- Spacing (points) ----
-Private Const SP_TITLE    As Single = 12
+Private Const SP_TITLE        As Single = 12
 Private Const SP_TITLE_BEFORE As Single = 19   ' gap below the header rule
-Private Const SP_DATE     As Single = 18
-Private Const SP_TRAD     As Single = 3
-Private Const SP_SECTION  As Single = 3
-Private Const SP_HEAD     As Single = 10
-Private Const SP_BODY     As Single = 10
-Private Const SP_META     As Single = 10   ' gap above the byline line
-Private Const DIV_LEN     As Integer = 41
+Private Const SP_DATE         As Single = 18
+Private Const SP_TRAD         As Single = 3
+Private Const SP_SECTION      As Single = 3
+Private Const SP_HEAD         As Single = 10
+Private Const SP_BODY         As Single = 10
+Private Const SP_META         As Single = 10   ' gap above the byline line
+Private Const DIV_LEN         As Integer = 41
+
+' ---- Cat2 audit accumulator ----
+Private gCatFlags As String
 
 Sub FormatMorningClips()
-
     StripSummaryHeadlineNumbers
-
     Dim doc As Document
     Set doc = ActiveDocument
     Application.ScreenUpdating = False
-
     On Error Resume Next
     ActiveWindow.View.ShowFieldCodes = False
     On Error GoTo 0
@@ -71,7 +75,6 @@ Sub FormatMorningClips()
     ReplaceAll ChrW(65279), ""
     ReplaceAll ChrW(160), " "
     ReplaceAll "^l", "^p"
-
     TrimParagraphSpaces
     FixUrlSpaces
 
@@ -106,7 +109,6 @@ Sub FormatMorningClips()
     For i = 1 To doc.Paragraphs.Count
         Set p = doc.Paragraphs(i)
         s = ParaText(p)
-
         If s = "FULL ARTICLES" Then inFullArticles = True
 
         With p.Range.Font
@@ -116,7 +118,6 @@ Sub FormatMorningClips()
         p.LeftIndent = 0: p.FirstLineIndent = 0
         p.SpaceBefore = 0: p.SpaceAfter = 0
         p.TabStops.ClearAll
-
         p.Borders(wdBorderTop).LineStyle = wdLineStyleNone
         p.Borders(wdBorderBottom).LineStyle = wdLineStyleNone
         p.Borders(wdBorderLeft).LineStyle = wdLineStyleNone
@@ -196,6 +197,7 @@ Sub FormatMorningClips()
 
     StripColorTags
     HighlightAll
+    CheckCat2Highlighting
     SplitRosterLines
     NumberRosterEntries
     SplitEntryHeaders
@@ -205,12 +207,15 @@ Sub FormatMorningClips()
     FixSectionAlignment
 
     Application.ScreenUpdating = True
-    MsgBox "FormatMorningClips done.", vbInformation
+
+    If Len(gCatFlags) = 0 Then
+        MsgBox "FormatMorningClips done." & vbCrLf & vbCrLf & "Cat2 check: no anomalies.", vbInformation
+    Else
+        MsgBox "FormatMorningClips done." & vbCrLf & vbCrLf & "Cat2 check - REVIEW:" & vbCrLf & vbCrLf & gCatFlags, vbExclamation
+    End If
 End Sub
 
-
 ' ---------- FULL ARTICLES boundary ----------
-
 Private Function FullArticlesStart() As Long
     ' Paragraph index of the "FULL ARTICLES" heading; 0 if absent (summary-only doc).
     Dim doc As Document: Set doc = ActiveDocument
@@ -224,9 +229,92 @@ Private Function FullArticlesStart() As Long
     FullArticlesStart = 0
 End Function
 
+' ---------- Cat2 misfiling audit ----------
+Private Sub CheckCat2Highlighting()
+    ' Additive. Reads highlight formatting only; changes nothing.
+    ' The macro highlights Cat2 keywords independently of the Reporter's
+    ' categorisation, so the two can be cross-checked:
+    '   article under ii with NO yellow   -> misfiled into ii
+    '   article under iii WITH yellow     -> Cat2 precedence, should be ii
+    ' Section i is deliberately not checked: a Neil Shen article may
+    ' legitimately contain a Cat2 keyword.
+    ' Known false positive: HiliteTerm skips bold runs, and headlines are
+    ' bolded before HighlightAll. An article whose only Cat2 mention is in
+    ' its headline will flag as "no yellow". Treat flags as a prompt to
+    ' check, not a verdict.
+    Dim doc As Document: Set doc = ActiveDocument
+    Dim i As Long, s As String
+    Dim faStart As Long, lastP As Long
+    Dim sect As Integer, curSect As Integer
+    Dim artStart As Long, artHead As String, n As Long
+
+    gCatFlags = ""
+    n = 0: sect = 0: curSect = 0: artStart = 0
+
+    faStart = FullArticlesStart()
+    If faStart = 0 Then
+        lastP = doc.Paragraphs.Count
+    Else
+        lastP = faStart - 1
+    End If
+    If lastP < 1 Then Exit Sub
+
+    For i = 1 To lastP
+        s = ParaText(doc.Paragraphs(i))
+        If IsSection(s) Then
+            If artStart > 0 Then AuditArticle doc, artStart, i - 1, curSect, artHead, n
+            artStart = 0
+            sect = SectionNumeral(s)
+        ElseIf IsHeadline(s) And Not IsRosterLine(s) And sect > 0 Then
+            If artStart > 0 Then AuditArticle doc, artStart, i - 1, curSect, artHead, n
+            artStart = i
+            artHead = s
+            curSect = sect
+        End If
+    Next i
+
+    If artStart > 0 Then AuditArticle doc, artStart, lastP, curSect, artHead, n
+End Sub
+
+Private Function SectionNumeral(ByVal s As String) As Integer
+    Dim t As String
+    t = Replace(s, vbTab, " ")
+    If Left(t, 4) = "iii." Then
+        SectionNumeral = 3
+    ElseIf Left(t, 3) = "ii." Then
+        SectionNumeral = 2
+    ElseIf Left(t, 2) = "i." Then
+        SectionNumeral = 1
+    End If
+End Function
+
+Private Sub AuditArticle(doc As Document, pStart As Long, pEnd As Long, sect As Integer, head As String, ByRef n As Long)
+    Dim r As Range, hasY As Boolean, e As Long
+    e = pEnd
+    If e < pStart Then e = pStart
+    If e > doc.Paragraphs.Count Then e = doc.Paragraphs.Count
+    Set r = doc.Range(doc.Paragraphs(pStart).Range.Start, doc.Paragraphs(e).Range.End)
+    hasY = HasYellow(r)
+    If sect = 2 And Not hasY Then
+        n = n + 1
+        gCatFlags = gCatFlags & n & ". [ii, NO yellow] " & Left(head, 90) & vbCrLf
+    ElseIf sect = 3 And hasY Then
+        n = n + 1
+        gCatFlags = gCatFlags & n & ". [iii, HAS yellow] " & Left(head, 90) & vbCrLf
+    End If
+End Sub
+
+Private Function HasYellow(rng As Range) As Boolean
+    Dim w As Range
+    For Each w In rng.Words
+        If w.HighlightColorIndex = wdYellow Then
+            HasYellow = True
+            Exit Function
+        End If
+    Next w
+End Function
 
 ' ---------- structural transforms ----------
-
 Private Sub RemoveContentControls()
     Dim doc As Document: Set doc = ActiveDocument
     On Error Resume Next
@@ -238,7 +326,6 @@ Private Sub RemoveContentControls()
     Loop
     On Error GoTo 0
 End Sub
-
 
 Private Sub UnlinkHyperlinksToUrlText()
     Dim doc As Document: Set doc = ActiveDocument
@@ -257,7 +344,6 @@ Private Sub UnlinkHyperlinksToUrlText()
     Loop
 End Sub
 
-
 Private Sub RemoveHorizontalRules()
     ' Delete Word AutoFormat horizontal-rule shapes (o:hr rects, the grey line).
     ' These are picture shapes in runs, not paragraph borders, so the border
@@ -265,13 +351,11 @@ Private Sub RemoveHorizontalRules()
     ' deterministically by EnsureDivider.
     Dim doc As Document: Set doc = ActiveDocument
     Dim i As Long
-
     For i = doc.InlineShapes.Count To 1 Step -1
         On Error Resume Next
         doc.InlineShapes(i).Delete
         On Error GoTo 0
     Next i
-
     For i = doc.Shapes.Count To 1 Step -1
         On Error Resume Next
         doc.Shapes(i).Delete
@@ -301,10 +385,8 @@ Private Sub NumberRosterEntries()
     For i = 1 To doc.Paragraphs.Count - 1
         s = ParaText(doc.Paragraphs(i))
         nxt = ParaText(doc.Paragraphs(i + 1))
-
         ' reset the counter at each article headline or section header
         If IsHeadline(s) Or IsSection(s) Or s = "FULL ARTICLES" Then n = 0
-
         If Left(nxt, 5) = "Firm:" And Len(s) > 0 And Len(s) < 60 Then
             If InStr(s, ":") = 0 Then
                 If StartsWithNumber(s) Then
@@ -334,17 +416,14 @@ Private Sub SplitEntryHeaders()
     Dim doc As Document: Set doc = ActiveDocument
     Dim i As Long, raw As String, w() As String
     Dim cutAfter As Long, st As Long
-
     For i = doc.Paragraphs.Count To 1 Step -1
         raw = doc.Paragraphs(i).Range.Text
         If Len(raw) > 0 Then
             If Right$(raw, 1) = vbCr Then raw = Left$(raw, Len(raw) - 1)
         End If
         If Len(raw) < 6 Then GoTo NextP
-
         w = Split(raw, " ")
         cutAfter = 0
-
         If UBound(w) >= 2 Then
             If w(0) = w(1) And Len(w(0)) >= 3 Then
                 cutAfter = Len(w(0))
@@ -354,7 +433,6 @@ Private Sub SplitEntryHeaders()
                 End If
             End If
         End If
-
         If cutAfter > 0 Then
             st = doc.Paragraphs(i).Range.Start
             doc.Range(st + cutAfter, st + cutAfter + 1).Text = vbCr
@@ -362,7 +440,6 @@ Private Sub SplitEntryHeaders()
 NextP:
     Next i
 End Sub
-
 
 Private Function IsNumToken(ByVal t As String) As Boolean
     ' "3." or "3:" style entry number
@@ -391,7 +468,6 @@ Private Sub TrimParagraphSpaces()
     Next i
 End Sub
 
-
 Private Sub DeleteParasEqualTo(target As String)
     Dim doc As Document: Set doc = ActiveDocument
     Dim i As Long
@@ -401,7 +477,6 @@ Private Sub DeleteParasEqualTo(target As String)
         End If
     Next i
 End Sub
-
 
 Private Sub SplitTitleDate()
     ' Title and date sometimes arrive glued in one paragraph:
@@ -419,7 +494,6 @@ Private Sub SplitTitleDate()
         doc.Range(cutPos, cutPos).InsertBefore vbCr
     End If
 End Sub
-
 
 Private Sub SplitUrlOffHeadlines()
     Dim doc As Document: Set doc = ActiveDocument
@@ -445,41 +519,46 @@ Private Sub SplitUrlOffHeadlines()
 End Sub
 
 Private Sub SplitSocials()
-    ' Summary only. Full Articles bodies can legitimately begin with
-    ' "Facebook ..." (e.g. the Meta entry), which would otherwise be
-    ' mis-split into a fake social-channel bullet.
+    ' Summary only. Backstop for when the Reporter glues a social label to its
+    ' content in one paragraph ("Facebook No relevant news").
+    ' v12b: two guards, both added after 12 Aug, when this sub split BOTH the
+    ' headline "Facebook parent Meta ... | SCMP" and the body "Facebook owner
+    ' Meta Platforms is set to ..." in the same article.
+    '   1. Not IsHeadline(s)  - a headline can open with a label.
+    '   2. remainder must start "http" or "No relevant news" - the only two
+    '      forms a real social line takes in gold. Prose never matches.
     Dim doc As Document: Set doc = ActiveDocument
     Dim labels As Variant
     labels = Array("Facebook", "X (Twitter)", "YouTube")
     Dim i As Long, j As Long, p As Paragraph, s As String
-    Dim lbl As String, cutPos As Long, guard As Long, faStart As Long
-
+    Dim lbl As String, rest As String, cutPos As Long, guard As Long, faStart As Long
     faStart = FullArticlesStart()
     If faStart = 0 Then faStart = doc.Paragraphs.Count + 1
-
     For i = faStart - 1 To 1 Step -1
         Set p = doc.Paragraphs(i)
         s = ParaText(p)
         For j = LBound(labels) To UBound(labels)
             lbl = labels(j)
-            If Len(s) > Len(lbl) Then
+            If Len(s) > Len(lbl) And Not IsHeadline(s) Then
                 If Left(s, Len(lbl)) = lbl And Mid(s, Len(lbl) + 1, 1) = " " Then
-                    p.Range.InsertBefore ChrW(8226) & vbTab
-                    cutPos = p.Range.Start + 2 + Len(lbl)
-                    guard = 0
-                    Do While doc.Range(cutPos, cutPos + 1).Text = " "
-                        doc.Range(cutPos, cutPos + 1).Delete
-                        guard = guard + 1
-                        If guard > 50 Then Exit Do
-                    Loop
-                    doc.Range(cutPos, cutPos).InsertBefore vbCr
-                    Exit For
+                    rest = Trim(Mid(s, Len(lbl) + 1))
+                    If LCase(Left(rest, 4)) = "http" Or LCase(Left(rest, 16)) = "no relevant news" Then
+                        p.Range.InsertBefore ChrW(8226) & vbTab
+                        cutPos = p.Range.Start + 2 + Len(lbl)
+                        guard = 0
+                        Do While doc.Range(cutPos, cutPos + 1).Text = " "
+                            doc.Range(cutPos, cutPos + 1).Delete
+                            guard = guard + 1
+                            If guard > 50 Then Exit Do
+                        Loop
+                        doc.Range(cutPos, cutPos).InsertBefore vbCr
+                        Exit For
+                    End If
                 End If
             End If
         Next j
     Next i
 End Sub
-
 
 Private Sub PrependSectionNumerals()
     Dim doc As Document: Set doc = ActiveDocument
@@ -496,7 +575,6 @@ Private Sub PrependSectionNumerals()
         End If
     Next i
 End Sub
-
 
 Private Sub NumberHeadlines()
     ' Numbers headlines in BOTH the Summary and Full Articles, per-section,
@@ -525,7 +603,6 @@ Private Sub NumberHeadlines()
     Next i
 End Sub
 
-
 Sub DenumberLeakedRosters()
     ' Strip the "N." + tab/space that numbering puts on a roster line
     ' mis-classified as a headline. Pure backstop - only strips a leading
@@ -534,13 +611,11 @@ Sub DenumberLeakedRosters()
     Dim doc As Document, para As Paragraph, rng As Range
     Dim t As String, p As Long, j As Long
     Set doc = ActiveDocument
-
     For p = 1 To doc.Paragraphs.Count
         Set para = doc.Paragraphs(p)
         Set rng = para.Range
         t = rng.Text
         If Len(t) > 0 Then If Right$(t, 1) = vbCr Then t = Left$(t, Len(t) - 1)
-
         j = 1
         Do While j <= Len(t)
             If Mid$(t, j, 1) >= "0" And Mid$(t, j, 1) <= "9" Then j = j + 1 Else Exit Do
@@ -554,7 +629,6 @@ Sub DenumberLeakedRosters()
         End If
     Next p
 End Sub
-
 
 Private Sub PruneAttributionRoster()
     ' Deterministic roster cleanup - SUMMARY ONLY. On a "Where it counted most... | #"
@@ -578,7 +652,6 @@ Private Sub PruneAttributionRoster()
         Set para = doc.Paragraphs(p)
         t = para.Range.Text
         If Len(t) > 0 Then If Right$(t, 1) = vbCr Then t = Left$(t, Len(t) - 1)
-
         If InStr(t, "| #") > 0 And InStr(t, "Where it counted most") > 0 Then
             cutAt = InStr(t, ":*")
             If cutAt > 0 Then
@@ -594,7 +667,6 @@ Private Sub PruneAttributionRoster()
                     body = t
                 End If
             End If
-
             kept = ""
             curUnit = ""
             i = 1
@@ -622,12 +694,10 @@ Private Sub PruneAttributionRoster()
                 End If
                 i = i + 1
             Loop
-
             para.Range.Text = Trim(header & " " & kept) & vbCr
         End If
     Next p
 End Sub
-
 
 Private Sub EnsureDivider()
     ' The Reporter's own em-dash divider gets converted to an HR shape by Word
@@ -638,9 +708,7 @@ Private Sub EnsureDivider()
     Dim doc As Document: Set doc = ActiveDocument
     Dim faStart As Long
     Dim lastP As Paragraph
-
     faStart = FullArticlesStart()
-
     If faStart > 0 Then
         If faStart > 1 Then
             If IsDivider(ParaText(doc.Paragraphs(faStart - 1))) Then Exit Sub
@@ -657,7 +725,6 @@ Private Sub EnsureDivider()
     End If
 End Sub
 
-
 Sub SplitRosterLines()
     ' Deterministic roster re-splitting for flattened Midas-style stat-blocks.
     ' Wrap MUST be wdFindStop: the replacement text contains the search text,
@@ -668,7 +735,6 @@ Sub SplitRosterLines()
     Dim labels As Variant
     Dim i As Long
     Dim rng As Range
-
     Set doc = ActiveDocument
 
     ' 1) Break before a numbered roster entry header ("12. Neil Shen") glued to
@@ -689,7 +755,6 @@ Sub SplitRosterLines()
     ' 2) Break before each stat-block label. Bare label catches both the spaced
     '    form and the glued "NameFirm:" form.
     labels = Array("Firm:", "Total appearances:", "Average rank:", "Best rank:", "Net Worth:", "First year on the list:", "Last year on the list:", "Biggest deals:")
-
     For i = LBound(labels) To UBound(labels)
         Set rng = doc.Content
         With rng.Find
@@ -709,8 +774,6 @@ Sub SplitRosterLines()
     ReplaceAll "^p^p", "^p"
 End Sub
 
-
-
 Private Sub StripColorTags()
     ' Backstop: delete literal color-tag markup if the Reporter/FullArticles
     ' prompt leaks it (e.g. "[TURQUOISE]Hillhouse[/TURQUOISE]").
@@ -721,9 +784,7 @@ Private Sub StripColorTags()
     Next i
 End Sub
 
-
 ' ---------- helpers ----------
-
 Private Sub ReplaceAll(findText As String, replText As String)
     With ActiveDocument.Content.Find
         .ClearFormatting
@@ -741,7 +802,6 @@ Private Sub ReplaceAll(findText As String, replText As String)
     End With
 End Sub
 
-
 Private Function ParaText(p As Paragraph) As String
     Dim t As String
     t = p.Range.Text
@@ -750,7 +810,6 @@ Private Function ParaText(p As Paragraph) As String
     Loop
     ParaText = Trim(t)
 End Function
-
 
 Private Function IsDateLine(s As String) As Boolean
     Dim a() As String
@@ -762,11 +821,9 @@ Private Function IsDateLine(s As String) As Boolean
     End If
 End Function
 
-
 Private Function IsSection(s As String) As Boolean
     IsSection = (s Like "i." & vbTab & "*") Or (s Like "ii." & vbTab & "*") Or (s Like "iii." & vbTab & "*") Or (s Like "i. *") Or (s Like "ii. *") Or (s Like "iii. *")
 End Function
-
 
 Private Function IsSocial(s As String) As Boolean
     Dim bt As String, bs As String
@@ -775,13 +832,11 @@ Private Function IsSocial(s As String) As Boolean
     IsSocial = (s = bt & "Facebook") Or (s = bt & "X (Twitter)") Or (s = bt & "YouTube") Or (s = bs & "Facebook") Or (s = bs & "X (Twitter)") Or (s = bs & "YouTube")
 End Function
 
-
 Private Function IsRosterLine(ByVal s As String) As Boolean
     ' Attribution roster line: contains " | #" or the roster header text.
     ' Checked BEFORE IsHeadline so rosters get body styling, not bold headline styling.
     IsRosterLine = (InStr(s, "| #") > 0) Or (InStr(s, "Where it counted most") > 0)
 End Function
-
 
 Private Function IsHeadline(s As String) As Boolean
     ' Tolerates a leading "- " (Full Articles dash form) so both NumberHeadlines
@@ -793,12 +848,10 @@ Private Function IsHeadline(s As String) As Boolean
     IsHeadline = (InStr(t, " | ") > 0) And Not IsSection(t) And Not IsSocial(t)
 End Function
 
-
 Private Function IsBylineLine(ByVal s As String) As Boolean
     ' A Full Articles byline line: starts with "By " and is short, not a headline.
     IsBylineLine = (Left(s, 3) = "By ") And (Len(s) < 120) And (InStr(s, " | ") = 0)
 End Function
-
 
 Private Function IsLongFormDate(ByVal s As String) As Boolean
     ' A Full Articles date line: "May 20, 2026" style. Short, month-first, year-last.
@@ -813,11 +866,9 @@ Private Function IsLongFormDate(ByVal s As String) As Boolean
     Next i
 End Function
 
-
 Private Function IsURL(s As String) As Boolean
     IsURL = (LCase(Left(s, 4)) = "http")
 End Function
-
 
 Private Function IsDivider(s As String) As Boolean
     If Len(s) >= 3 Then
@@ -826,12 +877,10 @@ Private Function IsDivider(s As String) As Boolean
     End If
 End Function
 
-
 Private Function IsUpperLetter(ByVal ch As String) As Boolean
     If Len(ch) = 0 Then Exit Function
     IsUpperLetter = (ch >= "A" And ch <= "Z")
 End Function
-
 
 Private Function EndsWithAbbrev(ByVal leftPart As String) As Boolean
     Dim k As Long, ch As String, tok As String
@@ -846,7 +895,6 @@ Private Function EndsWithAbbrev(ByVal leftPart As String) As Boolean
             Exit Do
         End If
     Loop
-
     Dim abbr As Variant
     abbr = Array("Ltd", "Inc", "Co", "Corp", "U.S", "U.K", "A.N.C", "Mr", "Mrs", "Ms", "Dr", "St", "vs", "etc", "No", "Jr", "Sr", "Ph.D")
     Dim a As Long
@@ -856,10 +904,8 @@ Private Function EndsWithAbbrev(ByVal leftPart As String) As Boolean
             Exit Function
         End If
     Next a
-
     If Len(tok) = 1 And tok >= "A" And tok <= "Z" Then EndsWithAbbrev = True
 End Function
-
 
 Private Sub SetCleanText(p As Paragraph, newText As String)
     Dim r As Range
@@ -867,7 +913,6 @@ Private Sub SetCleanText(p As Paragraph, newText As String)
     r.MoveEnd wdCharacter, -1
     r.Text = newText
 End Sub
-
 
 Private Sub MakeHyperlink(p As Paragraph, url As String)
     Dim r As Range, h As Hyperlink
@@ -883,9 +928,7 @@ Private Sub MakeHyperlink(p As Paragraph, url As String)
     On Error GoTo 0
 End Sub
 
-
 ' ---------- highlighting ----------
-
 Private Sub HighlightAll()
     ' Runs over the WHOLE document - gold highlights keywords in Full Articles too.
     Dim doc As Document: Set doc = ActiveDocument
@@ -894,7 +937,7 @@ Private Sub HighlightAll()
     green = Split("Neil Shen", "|")
     yellow = Split("HongShan|Hongshan|HSG|Sequoia China", "|")
     turq = Split("IDG Capital|IDG|ZhenFund|Hillhouse|Granite Asia|Matrix Partners China|Qiming Venture Partners|KKR|EQT|TPG|Walden International|Carlyle|SoftBank", "|")
-    
+
     For i = 1 To doc.Paragraphs.Count
         Set p = doc.Paragraphs(i)
         s = ParaText(p)
@@ -906,14 +949,12 @@ Private Sub HighlightAll()
     Next i
 End Sub
 
-
 Private Sub HiliteList(rng As Range, terms() As String, clr As Long)
     Dim k As Long
     For k = LBound(terms) To UBound(terms)
         HiliteTerm rng, terms(k), clr
     Next k
 End Sub
-
 
 Private Sub HiliteTerm(rng As Range, term As String, clr As Long)
     Dim f As Range, lastPos As Long
@@ -939,6 +980,7 @@ Private Sub HiliteTerm(rng As Range, term As String, clr As Long)
         f.End = rng.End
     Loop
 End Sub
+
 Private Sub SplitBylineDate()
     ' Byline and date arrive merged ("By Mark Sparrow May 19, 2026").
     ' Split before the trailing "Month D, YYYY" so each gets its own line.
@@ -996,7 +1038,7 @@ End Sub
 
 Sub FixDivider()
     ' Backstop only. Converts a literal "---" line the Reporter may emit into
-    ' the 40 em-dash rule. The social-label half of the old FixSocialAndDivider
+    ' the em-dash rule. The social-label half of the old FixSocialAndDivider
     ' has been removed; that work now runs before the styling loop, in
     ' StripSocialMarkers and BulletSocialLabels, so IsSocial can fire.
     Dim p As Paragraph, r As Range, t As String
@@ -1022,10 +1064,8 @@ Private Sub StripSocialMarkers()
     labels = Array("Facebook", "X (Twitter)", "YouTube")
     Dim i As Long, j As Long, p As Paragraph
     Dim raw As String, rest As String, pos As Long, faStart As Long
-
     faStart = FullArticlesStart()
     If faStart = 0 Then faStart = doc.Paragraphs.Count + 1
-
     For i = faStart - 1 To 1 Step -1
         Set p = doc.Paragraphs(i)
         raw = p.Range.Text
@@ -1055,6 +1095,7 @@ Private Sub StripSocialMarkers()
         End If
     Next i
 End Sub
+
 Private Sub BulletSocialLabels()
     ' Summary only. Runs AFTER SplitSocials.
     ' Adds the bullet + tab to a social label sitting on its own line, so
@@ -1066,10 +1107,8 @@ Private Sub BulletSocialLabels()
     Dim labels As Variant
     labels = Array("Facebook", "X (Twitter)", "YouTube")
     Dim i As Long, j As Long, p As Paragraph, s As String, faStart As Long
-
     faStart = FullArticlesStart()
     If faStart = 0 Then faStart = doc.Paragraphs.Count + 1
-
     For i = faStart - 1 To 1 Step -1
         Set p = doc.Paragraphs(i)
         s = ParaText(p)
@@ -1087,23 +1126,16 @@ Private Sub FormatFullArticlesLayout()
     ' paragraph - with 1.25 line spacing on date and body text. Headlines and
     ' bylines stay single-spaced. Runs LAST: it overrides the IND_ITEM indents
     ' the main styling loop applies, rather than adding FA branches there.
-    ' Final step insets the FULL ARTICLES heading with two literal tabs (per
-    ' gold). That edit breaks exact-text matching of the heading, which is why
-    ' this sub must run after every routine that locates "FULL ARTICLES".
     Dim doc As Document: Set doc = ActiveDocument
     Dim faStart As Long, i As Long, p As Paragraph, s As String
-
     faStart = FullArticlesStart()
     If faStart = 0 Then Exit Sub                 ' summary-only doc
-
     For i = faStart + 1 To doc.Paragraphs.Count
         Set p = doc.Paragraphs(i)
         s = ParaText(p)
-
         p.LeftIndent = 0
         p.FirstLineIndent = 0
         p.TabStops.ClearAll
-
         If s = "-ENDS-" Then
             ' keep centred, single spacing - set by the main loop
         ElseIf IsSection(s) Or IsHeadline(s) Or IsBylineLine(s) Then
@@ -1116,10 +1148,7 @@ Private Sub FormatFullArticlesLayout()
             p.LineSpacing = LinesToPoints(1.25)
         End If
     Next i
-
 End Sub
-
-
 
 Private Sub FixSectionAlignment()
     ' Sections: numeral at IND_SEC_NUM, name at IND_SEC_TXT via explicit tab stop.
@@ -1129,16 +1158,14 @@ Private Sub FixSectionAlignment()
     Dim doc As Document: Set doc = ActiveDocument
     Dim p As Paragraph, s As String, pos As Long
     Dim faStart As Long, faPos As Long
-
     faStart = FullArticlesStart()
     If faStart = 0 Then
         faPos = doc.Content.End + 1              ' summary-only doc: no boundary
     Else
         faPos = doc.Paragraphs(faStart).Range.Start
     End If
-
     For Each p In doc.Paragraphs
-        If p.Range.Start < faPos Then            ' <-- summary region only
+        If p.Range.Start < faPos Then
             s = ParaText(p)
             If IsSection(s) Then
                 pos = InStr(p.Range.Text, ".")
@@ -1150,8 +1177,7 @@ Private Sub FixSectionAlignment()
                 p.LeftIndent = CentimetersToPoints(IND_SEC_TXT)
                 p.FirstLineIndent = CentimetersToPoints(IND_SEC_NUM - IND_SEC_TXT)
                 p.TabStops.ClearAll
-                p.TabStops.Add Position:=CentimetersToPoints(IND_SEC_TXT), _
-                               Alignment:=wdAlignTabLeft
+                p.TabStops.Add Position:=CentimetersToPoints(IND_SEC_TXT), Alignment:=wdAlignTabLeft
             End If
         End If
     Next p
@@ -1191,12 +1217,9 @@ End Sub
 Sub RepairArtifacts(doc As Document)
     Dim comp As Variant, k As Long, p As Paragraph
     ' hyphenated compounds split by a source line wrap - pairs of find, replace
-    comp = Array("year-on- year", "year-on-year", _
-                 "year-over- year", "year-over-year", _
-                 "brake-by- wire", "brake-by-wire", _
-                 "fast- fashion", "fast-fashion", _
-                 "book- building", "book-building")
-
+    StripFurniture
+    RepairWrapArtifacts
+    comp = Array("year-on- year", "year-on-year", "year-over- year", "year-over-year", "brake-by- wire", "brake-by-wire", "fast- fashion", "fast-fashion", "book- building", "book-building")
     For Each p In doc.Paragraphs
         If InStr(1, p.Range.Text, "http", vbTextCompare) = 0 Then
             ' space eaten after a full stop: shares.Other -> shares. Other
@@ -1223,3 +1246,91 @@ Private Sub FindRepl(r As Range, pat As String, rep As String, wild As Boolean)
     End With
 End Sub
 
+Private Function CleanPara(s As String) As String
+    Dim t As String
+    t = Replace(s, Chr(13), "")
+    t = Replace(t, Chr(7), "")
+    t = Replace(t, Chr(11), "")
+    t = Replace(t, Chr(160), " ")
+    CleanPara = Trim$(t)
+End Function
+
+Private Sub StripFurniture()
+    Dim junk As Variant, i As Long, j As Long, t As String
+    ' Add new furniture strings here as you find them.
+    junk = Array("Live Events", "Advertisement", "Continue Reading", _
+                 "Read More", "Also Read", "Sign In", "Subscribe")
+    With ActiveDocument
+        For i = .Paragraphs.Count To 1 Step -1
+            t = CleanPara(.Paragraphs(i).Range.Text)
+            If Len(t) > 0 Then
+                For j = LBound(junk) To UBound(junk)
+                    If StrComp(t, CStr(junk(j)), vbTextCompare) = 0 Then
+                        .Paragraphs(i).Range.Delete
+                        Exit For
+                    End If
+                Next j
+            End If
+        Next i
+    End With
+End Sub
+
+
+Private Sub RepairWrapArtifacts()
+    Dim r As Range
+    Dim i As Long
+    Dim badPunct As Variant
+
+    ' 3a. close up line-wrap hyphens: "software- based" -> "software-based"
+    Set r = ActiveDocument.Content
+    With r.Find
+        .ClearFormatting
+        .Replacement.ClearFormatting
+        .Forward = True
+        .Wrap = wdFindStop
+        .Format = False
+        .MatchCase = False
+        .MatchWildcards = True
+        .Text = "([a-z])- ([a-z])"
+        .Replacement.Text = "\1-\2"
+        .Execute Replace:=wdReplaceAll
+    End With
+
+    ' 3b. restore genuine suspended hyphens broken by 3a
+    '     e.g. "software- and hardware-based"
+    Dim keep As Variant
+    keep = Array("-and ", "-or ", "-to ")
+    For i = LBound(keep) To UBound(keep)
+        Set r = ActiveDocument.Content
+        With r.Find
+            .ClearFormatting
+            .Replacement.ClearFormatting
+            .Forward = True
+            .Wrap = wdFindStop
+            .Format = False
+            .MatchCase = True
+            .MatchWildcards = False
+            .Text = CStr(keep(i))
+            .Replacement.Text = "- " & Mid$(CStr(keep(i)), 2)
+            .Execute Replace:=wdReplaceAll
+        End With
+    Next i
+
+    ' 3c. strip spaces before punctuation: "LY , a" -> "LY, a"
+    badPunct = Array(" ,", " ;", " :", " )", " ]", " !", " ?")
+    For i = LBound(badPunct) To UBound(badPunct)
+        Set r = ActiveDocument.Content
+        With r.Find
+            .ClearFormatting
+            .Replacement.ClearFormatting
+            .Forward = True
+            .Wrap = wdFindStop
+            .Format = False
+            .MatchCase = False
+            .MatchWildcards = False
+            .Text = CStr(badPunct(i))
+            .Replacement.Text = Mid$(CStr(badPunct(i)), 2)
+            .Execute Replace:=wdReplaceAll
+        End With
+    Next i
+End Sub
