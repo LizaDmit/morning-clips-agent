@@ -406,7 +406,6 @@ Recorded so they are not re-attempted:
   categorisation or reintroduces delimiter leakage, restore the saved baseline verbatim -
   never patch forward.
 - `git add <folder>` always; never `git add -A`.
-- Repository is private.
 
 ---
 
